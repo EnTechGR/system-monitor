@@ -77,10 +77,15 @@ To see GPU, SSD, and Battery info in WSL:
 4. Run the `./monitor` app in WSL. It will automatically detect the host IP and start bridging the data.
 
 ## ⚖️ Performance Notes
-This application is designed to be "invisible" to your system's resources:
-- **CPU Usage**: Typically **<15%** on modern systems.
-- **Memory Footprint**: Stable at **~1.5%** of system RAM.
-- **Refresh Rate**: Graphs and heavy stats update every 2 seconds, while the UI responds at 20 FPS.
+
+This application is engineered for maximum transparency and minimal resource impact:
+
+- **CPU Usage**: Typically **<15%** (often significantly lower on modern systems). 
+  - **Smart Redraw**: The app detects if a window is collapsed or hidden and completely skips its data-polling and rendering logic.
+  - **Throttled Rendering**: Capped at **15 FPS** with VSync disabled to prevent the CPU/GPU from "spinning" or busy-waiting in virtualized environments like WSLg.
+  - **High-Precision Timing**: Uses `std::chrono` for nanosecond-accurate metrics without the overhead of heavy system calls.
+- **Memory Footprint**: Extremely lean, stable at **~1.5%** of system RAM.
+- **Background Overhead**: The hardware bridge and data-gathering threads are throttled to update every 3 seconds to minimize context switching.
 
 ## 📄 License
 This project is licensed under the MIT License. It includes [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and [gl3w](https://github.com/skaslev/gl3w) (Unlicense).

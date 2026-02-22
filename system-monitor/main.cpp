@@ -81,6 +81,9 @@ static void progressBar(const char *label, long long used, long long total, cons
 
 // ── System Window ─────────────────────────────────────────────────────────────
 
+// Global shared state for process counts to maintain single-pass optimization
+static ProcessCounts g_sharedCounts = {};
+
 void systemWindow(const char *id, ImVec2 size, ImVec2 position)
 {
     ImGui::Begin(id);
@@ -91,7 +94,6 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
     static string username = getUsername();
     static string cpuName  = CPUinfo();
 
-    static ProcessCounts pCounts = {};
     static long long uptime = 0;
     static double lastInfoT = -5.0;
 
@@ -150,8 +152,8 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
     ImGui::Separator();
     ImGui::TextColored(ImVec4(1,0.85f,0.3f,1),
         "Tasks: %d total  |  %d running  |  %d sleeping  |  %d uninterruptible  |  %d zombie  |  %d stopped",
-        pCounts.total, pCounts.running, pCounts.sleeping,
-        pCounts.uninterruptible, pCounts.zombie, pCounts.stopped);
+        g_sharedCounts.total, g_sharedCounts.running, g_sharedCounts.sleeping,
+        g_sharedCounts.uninterruptible, g_sharedCounts.zombie, g_sharedCounts.stopped);
     ImGui::Separator();
 
     // ── Tabs ────────────────────────────────────────────────────────────────
@@ -224,12 +226,11 @@ void memoryProcessesWindow(const char *id, ImVec2 size, ImVec2 position)
     static double lastUpdateT = -5.0;
     static char filterBuf[128] = {};
 
-    static ProcessCounts pCountsBuf = {};
     double now = ImGui::GetTime();
     if (now - lastUpdateT > 2.0) {
         mem  = getMemInfo();
         disk = getDiskInfo();
-        procs = getProcessList(&pCountsBuf);
+        procs = getProcessList(&g_sharedCounts);
         lastUpdateT = now;
     }
 
@@ -465,6 +466,100 @@ void networkWindow(const char *id, ImVec2 size, ImVec2 position)
     ImGui::End();
 }
 
+void advancedMetricsWindow(const char *id, ImVec2 size, ImVec2 position)
+{
+    ImGui::Begin(id);
+    ImGui::SetWindowSize(id, size);
+    ImGui::SetWindowPos(id, position);
+
+    static AdvancedMetrics am = {};
+    static double lastUpdateT = -5.0;
+    double now = ImGui::GetTime();
+
+    if (now - lastUpdateT > 2.0) {
+        am = getAdvancedMetrics();
+        lastUpdateT = now;
+    }
+
+    if (ImGui::CollapsingHeader("Kernel & CPU Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::BeginTable("perfTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Load Avg (1/5/15)");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f / %.2f / %.2f", am.cpuLoad1, am.cpuLoad5, am.cpuLoad15);
+            
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Clock Speed");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.1f MHz", am.cpuFreqMHz);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Entropy Available");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%d bits", am.entropy);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Interrupts (Total)");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%llu", am.interrupts);
+
+            if (am.hasLHM) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("Pkg Voltage / Power");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f V / %.1f W", am.cpuVoltageV, am.cpuPowerW);
+            }
+            ImGui::EndTable();
+        }
+    }
+
+    if (am.hasLHM) {
+        if (ImGui::CollapsingHeader("GPU & Storage (Host Bridge)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::BeginTable("gpuStoreTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                // GPU
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextColored(ImVec4(0.4,1,0.4,1), "GPU Load / Temp");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.1f%% / %.1f C", am.gpuLoad, am.gpuTemp);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextColored(ImVec4(0.4,1,0.4,1), "GPU VRAM Load");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.1f%%", am.gpuMemLoad);
+
+                // Storage
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextColored(ImVec4(1,0.6,0.2,1), "SSD Health (Life)");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.0f %%", am.ssdLife);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextColored(ImVec4(1,0.6,0.2,1), "SSD Temp / TBW");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.1f C / %.2f TB", am.ssdTemp, am.ssdWrittenTB);
+
+                ImGui::EndTable();
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Battery Diagnostic", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::BeginTable("battTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("Level / Status");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.0f%% (%s)", am.batteryLevel, am.batteryStatus.empty() ? "N/A" : am.batteryStatus.c_str());
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("Voltage / Rate");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f V / %.1f W", am.batteryVoltage, am.batteryRateW);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("Wear Level");
+                ImGui::TableSetColumnIndex(1); 
+                char wearBuf[32]; snprintf(wearBuf, sizeof(wearBuf), "%.1f%% Wear", am.batteryWear);
+                ImGui::ProgressBar(am.batteryWear / 100.0f, ImVec2(-1, 20), wearBuf);
+
+                ImGui::EndTable();
+            }
+        }
+    } else {
+        ImGui::TextColored(ImVec4(1,1,0,1), "Host Bridge (LHM) not connected.");
+        ImGui::TextWrapped("Running on native Linux. GPU/Battery/SSD health metrics are sourced from LibreHardwareMonitor on Windows host.");
+    }
+
+    ImGui::End();
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(int, char **)
@@ -485,7 +580,7 @@ int main(int, char **)
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
     SDL_WindowFlags wf = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Window *window = SDL_CreateWindow("System Monitor", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, wf);
+    SDL_Window *window = SDL_CreateWindow("System Monitor", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1400, 850, wf);
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1);
@@ -550,15 +645,25 @@ int main(int, char **)
 
         {
             ImVec2 disp = io.DisplaySize;
+            float pad = 10.0f;
+            float midX = disp.x / 2.0f;
+            float midY = disp.y / 2.0f;
+
             systemWindow("== System ==",
-                ImVec2((disp.x / 2) - 10,  (disp.y / 2) + 30),
-                ImVec2(10, 10));
+                ImVec2(midX - pad * 1.5f, midY - pad * 1.5f),
+                ImVec2(pad, pad));
+
             memoryProcessesWindow("== Memory and Processes ==",
-                ImVec2((disp.x / 2) - 20, (disp.y / 2) + 30),
-                ImVec2((disp.x / 2) + 10, 10));
+                ImVec2(midX - pad * 1.5f, midY - pad * 1.5f),
+                ImVec2(midX + pad / 2.0f, pad));
+
             networkWindow("== Network ==",
-                ImVec2(disp.x - 20, (disp.y / 2) - 60),
-                ImVec2(10, (disp.y / 2) + 50));
+                ImVec2(midX - pad * 1.5f, midY - pad * 1.5f),
+                ImVec2(pad, midY + pad / 2.0f));
+
+            advancedMetricsWindow("== Advanced Metrics ==", 
+                ImVec2(midX - pad * 1.5f, midY - pad * 1.5f),
+                ImVec2(midX + pad / 2.0f, midY + pad / 2.0f));
         }
 
         ImGui::Render();

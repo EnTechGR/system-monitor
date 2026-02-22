@@ -121,6 +121,8 @@ string getHostIP()
     return "192.168.176.1";
 }
 
+static AdvancedMetrics g_advMetrics = {};
+static mutex g_advMtx;
 static string g_bridgeData = "";
 static mutex g_bridgeMtx;
 static atomic<bool> g_bridgeThreadStarted(false);
@@ -155,12 +157,16 @@ static void bridgeWorker()
                     if (response.find("{") != string::npos) {
                         auto getV = [&](string k, string t) {
                             size_t p = 0;
+                            // Search for the text key
                             while ((p = response.find("\"Text\":\"" + k + "\"", p)) != string::npos) {
-                                size_t eO = response.find("}", p);
-                                size_t tP = response.find("\"Type\":\"" + t + "\"", p);
-                                if (tP != string::npos && (eO == string::npos || tP < eO + 70)) {
+                                // Find the boundaries of this specific JSON object
+                                size_t endOfObj = response.find("}", p);
+                                size_t typePos = response.find("\"Type\":\"" + t + "\"", p);
+                                
+                                // Ensure the Type match belongs to THIS object (within ~150 chars)
+                                if (typePos != string::npos && (endOfObj == string::npos || typePos < endOfObj + 10)) {
                                     size_t vP = response.find("\"Value\":\"", p);
-                                    if (vP != string::npos && vP < tP + 100) {
+                                    if (vP != string::npos && vP < typePos + 100) {
                                         size_t s = vP + 9, e = response.find("\"", s);
                                         return response.substr(s, e - s);
                                     }
@@ -169,19 +175,56 @@ static void bridgeWorker()
                             }
                             return string("");
                         };
-                        string tS = getV("CPU Package", "Temperature");
-                        if (tS.empty()) tS = getV("CPU Total", "Temperature");
-                        string fS = getV("Fan #1", "Fan");
-                        if (fS.empty()) fS = getV("Fan", "Fan");
-                        
-                        float tV = -1; int fV = -1;
-                        if (!tS.empty()) { size_t s = tS.find_first_of("0123456789.-"); if (s != string::npos) tV = atof(tS.substr(s).c_str()); }
-                        if (!fS.empty()) { size_t s = fS.find_first_of("0123456789"); if (s != string::npos) fV = atoi(fS.substr(s).c_str()); }
 
-                        if (tV > 0 || fV >= 0) {
+                        auto parseF = [&](string v) {
+                             if (v.empty()) return -1.0f;
+                             // Extract first float-like number from string like "23.5 %" or "45.0 C"
+                             size_t s = v.find_first_of("0123456789.-");
+                             if (s == string::npos) return -1.0f;
+                             return (float)atof(v.substr(s).c_str());
+                        };
+
+                        AdvancedMetrics am = {};
+                        am.hasLHM = true;
+                        
+                        // CPU
+                        float tV = parseF(getV("CPU Package", "Temperature"));
+                        if (tV < 0) tV = parseF(getV("Core Max", "Temperature"));
+                        
+                        int fV = (int)parseF(getV("Fan #1", "Fan"));
+                        if (fV < 0) fV = (int)parseF(getV("Fan", "Fan"));
+                        
+                        am.cpuPowerW  = parseF(getV("CPU Package", "Power"));
+                        am.cpuFreqMHz = parseF(getV("CPU Core #1", "Clock"));
+                        am.cpuVoltageV = parseF(getV("CPU Core", "Voltage"));
+
+                        // GPU
+                        am.gpuLoad    = parseF(getV("D3D 3D", "Load"));
+                        if (am.gpuLoad < 0) am.gpuLoad = parseF(getV("GPU Core", "Load"));
+                        am.gpuTemp    = parseF(getV("GPU Core", "Temperature")); 
+                        am.gpuPowerW   = parseF(getV("GPU Power", "Power"));
+                        am.gpuMemLoad  = parseF(getV("D3D Shared Memory Used", "SmallData"));
+
+                        // Storage Health (SSD)
+                        am.ssdTemp    = parseF(getV("Temperature", "Temperature")); // Generic catch for SSD temp
+                        am.ssdLife    = parseF(getV("Life", "Level"));
+                        am.ssdWrittenTB = parseF(getV("Data Written", "Data")) / 1024.0f; // GB to TB approx
+
+                        // Battery
+                        am.batteryLevel   = parseF(getV("Charge Level", "Level"));
+                        am.batteryVoltage = parseF(getV("Voltage", "Voltage"));
+                        am.batteryRateW   = parseF(getV("Charge/Discharge Rate", "Power"));
+                        am.batteryWear    = parseF(getV("Degradation Level", "Level"));
+                        am.batteryStatus  = getV("Status", "Status");
+
+                        {
+                            lock_guard<mutex> lock(g_advMtx);
+                            g_advMetrics = am;
+                            
+                            // Legacy Bridge string for backward compatibility
                             char out[64];
                             snprintf(out, sizeof(out), "%.1f:%d:1", (tV > 0 ? tV : 0.0f), (fV >= 0 ? fV : 0));
-                            lock_guard<mutex> lock(g_bridgeMtx);
+                            lock_guard<mutex> lockB(g_bridgeMtx);
                             g_bridgeData = out;
                         }
                     }
@@ -193,8 +236,55 @@ static void bridgeWorker()
     }
 }
 
+AdvancedMetrics getAdvancedMetrics()
+{
+    AdvancedMetrics am;
+    bool inVM = isVirtualMachine();
+    {
+        lock_guard<mutex> lock(g_advMtx);
+        am = g_advMetrics;
+    }
+
+    // Load Avg
+    ifstream f("/proc/loadavg");
+    if (f.is_open()) { f >> am.cpuLoad1 >> am.cpuLoad5 >> am.cpuLoad15; }
+
+    // Frequency fallback
+    if (am.cpuFreqMHz <= 0) {
+        ifstream f2("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq");
+        if (f2.is_open()) {
+            float khz; f2 >> khz;
+            am.cpuFreqMHz = khz / 1000.0f;
+        }
+    }
+
+    // Entropy
+    {
+        ifstream f3("/proc/sys/kernel/random/entropy_avail");
+        if (f3.is_open()) f3 >> am.entropy;
+    }
+
+    // Context Switches & Interrupts
+    {
+        ifstream f4("/proc/stat");
+        string line;
+        while (getline(f4, line)) {
+            if (line.compare(0, 5, "ctxt ") == 0) am.contextSwitches = stoull(line.substr(5));
+            else if (line.compare(0, 5, "intr ") == 0) {
+                istringstream ss(line.substr(5));
+                ss >> am.interrupts; // First number is total
+            }
+        }
+    }
+
+    if (!inVM) am.hasLHM = false;
+    return am;
+}
+
 static string fetchFromHost()
 {
+    if (!isVirtualMachine()) return "";
+
     if (!g_bridgeThreadStarted.exchange(true)) {
         std::thread(bridgeWorker).detach();
     }

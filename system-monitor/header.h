@@ -83,6 +83,30 @@ struct ProcessCounts {
     int running, sleeping, uninterruptible, zombie, stopped, total;
 };
 
+struct AdvancedMetrics {
+    float cpuLoad1, cpuLoad5, cpuLoad15;
+    float cpuFreqMHz;
+    float cpuPowerW, cpuVoltageV;
+    
+    // GPU (from LHM)
+    string gpuName;
+    float gpuLoad, gpuTemp, gpuMemLoad;
+    float gpuPowerW;
+
+    // Storage (from LHM)
+    float ssdTemp, ssdLife, ssdWrittenTB;
+
+    // Battery (from LHM)
+    float batteryLevel, batteryVoltage, batteryRateW, batteryWear;
+    string batteryStatus;
+
+    // Kernel Stats (Native)
+    int entropy;
+    unsigned long long contextSwitches, interrupts;
+
+    bool hasLHM;
+};
+
 struct NetworkInterface {
     string name, ipv4;
     RX rx;
@@ -102,6 +126,7 @@ bool isThermalSimulated(); // New
 FanInfo getFanInfo();
 long long getUptime();
 ProcessCounts getProcessCounts();
+AdvancedMetrics getAdvancedMetrics();
 bool isVirtualMachine();
 string getEnvironmentInfo();
 string getHostIP();

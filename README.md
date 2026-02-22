@@ -29,7 +29,26 @@ A high-performance, low-overhead system monitoring tool built with **C++**, **De
 - [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) running on the Windows host.
 - **Remote Web Server** enabled in LHM (Options -> Remote Web Server -> Run).
 
-## 📦 Installation & Building
+## � Quick Start (Pre-built Binary)
+
+If you don't want to build from source, you can download the latest binary:
+
+1. **Download** the `monitor` executable from the [GitHub Releases](<repository-url>/releases).
+2. **Install Runtime Dependencies** (required for the UI):
+   ```bash
+   sudo apt-get update
+   sudo apt-get install libsdl2-2.0-0
+   ```
+3. **Grant Execution Permissions**:
+   ```bash
+   chmod +x monitor
+   ```
+4. **Run**:
+   ```bash
+   ./monitor
+   ```
+
+## �📦 Installation & Building (From Source)
 
 1. **Install Dependencies** (Ubuntu Example):
    ```bash
@@ -59,7 +78,7 @@ To see GPU, SSD, and Battery info in WSL:
 
 ## ⚖️ Performance Notes
 This application is designed to be "invisible" to your system's resources:
-- **CPU Usage**: Typically **<5%** on modern systems.
+- **CPU Usage**: Typically **<15%** on modern systems.
 - **Memory Footprint**: Stable at **~1.5%** of system RAM.
 - **Refresh Rate**: Graphs and heavy stats update every 2 seconds, while the UI responds at 20 FPS.
 

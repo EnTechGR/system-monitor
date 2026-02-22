@@ -59,7 +59,7 @@ If you don't want to build from source, you can download the latest binary:
 2. **Clone and Build**:
    ```bash
    git clone <repository-url>
-   cd system-monitor/system-monitor
+   cd system-monitor/src
    make
    ```
 

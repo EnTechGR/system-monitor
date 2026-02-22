@@ -108,64 +108,179 @@ string getEnvironmentInfo()
 
 string getHostIP()
 {
-    ifstream f("/etc/resolv.conf");
-    string line;
-    while (getline(f, line)) {
-        if (line.find("nameserver") != string::npos) {
-            size_t pos = line.find_first_of("0123456789");
-            if (pos != string::npos) return line.substr(pos);
-        }
-    }
-    return "127.0.0.1";
+    // Hardcoded for testing since user confirmed this is the host IP
+    return "192.168.176.1";
 }
 
-// Attempts to read string from host:8085. Format expected: "temp:fan_speed"
-// Example: "45.5:2100"
+// Attempts to read JSON from LHM web server: http://host:8085/data.json
 static string fetchFromHost()
 {
     static double lastAttemptT = 0;
-    static string lastResult = "";
+    static double lastFailureT = 0;
+    static string cachedData = ""; 
     double now = (double)time(NULL);
-    if (now - lastAttemptT < 1.0) return lastResult; // limit frequency
+
+    // Cooldown on failure (2 seconds for debugging)
+    if (now - lastFailureT < 2.0) return cachedData;
+    if (now - lastAttemptT < 1.0) return cachedData;
     lastAttemptT = now;
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return "";
 
-    struct timeval tv;
-    tv.tv_sec = 0; tv.tv_usec = 50000; // 50ms timeout - don't hang the UI
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
-
     struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(8085);
     string host = getHostIP();
+    
+    // Convert IP correctly
     if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) <= 0) {
+        printf("[Bridge] Invalid IP: %s\n", host.c_str());
         close(sock); return "";
     }
 
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        close(sock); return "";
+    printf("[Bridge] Connecting to %s:8085...\n", host.c_str());
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    
+    int res = connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
+    if (res < 0 && errno == EINPROGRESS) {
+        fd_set set; 
+        struct timeval tv = {2, 0}; // 2s timeout
+        FD_ZERO(&set); 
+        FD_SET(sock, &set);
+        int s_res = select(sock + 1, NULL, &set, NULL, &tv);
+        if (s_res > 0) {
+            int err; socklen_t len = sizeof(err);
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len);
+            if (err == 0) res = 0;
+            else errno = err;
+        } else if (s_res == 0) {
+            errno = ETIMEDOUT;
+        }
     }
 
-    char buffer[128] = {0};
-    int r = read(sock, buffer, 127);
+    if (res < 0) {
+        lastFailureT = now;
+        printf("[Bridge] Connection failed (Error %d: %s)\n", errno, strerror(errno));
+        close(sock); return cachedData;
+    }
+
+    // Connected!
+    printf("[Bridge] SUCCESS! Connected. Requesting data...\n");
+    string req = "GET /data.json HTTP/1.1\r\nHost: " + host + ":8085\r\nConnection: close\r\n\r\n";
+    send(sock, req.c_str(), req.length(), 0);
+
+    fcntl(sock, F_SETFL, flags);
+    struct timeval tv_r = {1, 0}; 
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv_r, sizeof tv_r);
+
+    string response;
+    char buf[16384]; 
+    int bytes;
+    while ((bytes = read(sock, buf, sizeof(buf)-1)) > 0) {
+        buf[bytes] = 0;
+        response += buf;
+        if (response.length() > 512 * 1024) break;
+    }
     close(sock);
-    if (r > 0) {
-        lastResult = string(buffer);
-        return lastResult;
+
+    if (response.find("{") == string::npos) return cachedData;
+
+    float t = -1; int f = -1;
+    
+    // Improved Helper: Finds a sensor by name AND type
+    auto getValByNameAndType = [&](string name, string type) {
+        size_t searchPos = 0;
+        while ((searchPos = response.find("\"Text\":\"" + name + "\"", searchPos)) != string::npos) {
+            // Check if "Type":"type" is within 200 chars of this sensor
+            size_t endOfObj = response.find("}", searchPos);
+            size_t typePos = response.find("\"Type\":\"" + type + "\"", searchPos);
+            
+            if (typePos != string::npos && (endOfObj == string::npos || typePos < endOfObj + 50)) {
+                size_t valPos = response.find("\"Value\":\"", searchPos);
+                if (valPos != string::npos && valPos < typePos + 100) {
+                    size_t start = valPos + 9;
+                    size_t end = response.find("\"", start);
+                    return response.substr(start, end - start);
+                }
+            }
+            searchPos += 10;
+        }
+        return string("");
+    };
+
+    // Fallback: Finds the FIRST sensor of a specific type
+    auto getFirstValByType = [&](string type) {
+        size_t typePos = response.find("\"Type\":\"" + type + "\"");
+        if (typePos == string::npos) return string("");
+        
+        // Value is usually just before Type in the JSON string
+        size_t startSearch = (typePos > 200) ? typePos - 200 : 0;
+        size_t valPos = response.find("\"Value\":\"", startSearch);
+        if (valPos != string::npos && valPos < typePos + 100) {
+            size_t start = valPos + 9;
+            size_t end = response.find("\"", start);
+            return response.substr(start, end - start);
+        }
+        return string("");
+    };
+
+    string tStr = getValByNameAndType("CPU Package", "Temperature");
+    if (tStr.empty()) tStr = getValByNameAndType("CPU Total", "Temperature");
+    if (tStr.empty()) tStr = getFirstValByType("Temperature");
+
+    if (!tStr.empty()) {
+        size_t s = tStr.find_first_of("0123456789.-");
+        if (s != string::npos) t = atof(tStr.substr(s).c_str());
     }
-    return "";
+
+    string fStr = getValByNameAndType("Fan #1", "Fan");
+    if (fStr.empty()) fStr = getValByNameAndType("Fan", "Fan");
+    if (fStr.empty()) fStr = getFirstValByType("Fan");
+
+    if (!fStr.empty()) {
+        size_t s = fStr.find_first_of("0123456789");
+        if (s != string::npos) f = atoi(fStr.substr(s).c_str());
+    }
+
+    if (t > 0 || f >= 0) {
+        char out[64];
+        snprintf(out, sizeof(out), "%.1f:%d:1", (t > 0 ? t : 0.0f), (f >= 0 ? f : 0));
+        cachedData = out;
+        printf("[Bridge] Match Found! Temp=%.1f C, Fan=%d RPM\n", t, f);
+    } else {
+        printf("[Bridge] No Temperature/Fan sensors found in JSON.\n");
+    }
+    return cachedData;
 }
+
+static bool thermalIsSim = false;
+
+bool isThermalSimulated() { return thermalIsSim; }
 
 float getTemperature()
 {
     // 1. Try Bridge first if in VM
     if (isVirtualMachine()) {
         string data = fetchFromHost();
-        size_t colon = data.find(':');
-        if (colon != string::npos) return atof(data.substr(0, colon).c_str());
+        // Protocol: temp:fan:is_real
+        // Example: "45.5:2100:1"
+        size_t c1 = data.find(':');
+        size_t c2 = data.rfind(':');
+        if (c1 != string::npos && c2 != string::npos && c1 != c2) {
+            float t = atof(data.substr(0, c1).c_str());
+            int realFlag = atoi(data.substr(c2 + 1).c_str());
+            if (t > 0) {
+                thermalIsSim = (realFlag == 0);
+                return t;
+            }
+        }
+    } else {
+        static bool logged = false;
+        if (!logged) { printf("[System] Not in VM mode, bridge inactive.\n"); logged = true; }
     }
 
     float temp = -1.0f;
@@ -185,30 +300,38 @@ float getTemperature()
         }
     }
 
-    // 3. Simulation Fallback
-    if (temp < 0 || temp == 0) {
-        static float lastSimTemp = 35.0f;
-        float target = 35.0f + (getCPUUsage() * 0.4f);
-        lastSimTemp = lastSimTemp * 0.9f + target * 0.1f;
-        return lastSimTemp;
+    if (temp > 0) {
+        thermalIsSim = false;
+        return temp;
     }
-    return temp;
+
+    // 3. Simulation Fallback
+    thermalIsSim = true;
+    static float lastSimTemp = 35.0f;
+    float target = 35.0f + (getCPUUsage() * 0.4f);
+    lastSimTemp = lastSimTemp * 0.9f + target * 0.1f;
+    return lastSimTemp;
 }
 
 FanInfo getFanInfo()
 {
-    FanInfo info = {false, false, 0, 0};
+    FanInfo info = {false, false, 0, 0, false};
 
     // 1. Try Bridge first
     if (isVirtualMachine()) {
         string data = fetchFromHost();
-        size_t colon = data.find(':');
-        if (colon != string::npos) {
-            info.speed   = atoi(data.substr(colon+1).c_str());
-            info.enabled = true;
-            info.active  = (info.speed > 0);
-            info.level   = (info.speed < 1200) ? 1 : (info.speed < 2000) ? 2 : (info.speed < 3000) ? 3 : 4;
-            return info;
+        size_t c1 = data.find(':');
+        size_t c2 = data.rfind(':');
+        if (c1 != string::npos && c2 != string::npos && c1 != c2) {
+            info.speed     = atoi(data.substr(c1 + 1, c2 - c1 - 1).c_str());
+            int realFlag   = atoi(data.substr(c2 + 1).c_str());
+            if (info.speed > 0 || realFlag == 1) {
+                info.enabled   = true;
+                info.active    = (info.speed > 0);
+                info.level     = (info.speed < 1200) ? 1 : (info.speed < 2000) ? 2 : (info.speed < 3000) ? 3 : 4;
+                info.simulated = (realFlag == 0);
+                return info;
+            }
         }
     }
 
@@ -225,6 +348,7 @@ FanInfo getFanInfo()
                     fi >> info.speed;
                     info.enabled = true; info.active = (info.speed > 0);
                     info.level = (info.speed < 1000) ? 1 : 2;
+                    info.simulated = false;
                     closedir(dir); return info;
                 }
             }
@@ -233,13 +357,12 @@ FanInfo getFanInfo()
     }
 
     // 3. Simulation Fallback
-    if (!info.enabled) {
-        float cpu = getCPUUsage();
-        info.enabled = true;
-        info.active  = (cpu > 2.0f);
-        info.speed   = info.active ? (int)(800 + cpu * 25.0f) : 0;
-        info.level   = (info.speed < 1200) ? 1 : (info.speed < 2000) ? 2 : (info.speed < 3000) ? 3 : 4;
-    }
+    float cpu = getCPUUsage();
+    info.enabled   = true;
+    info.active    = (cpu > 2.0f);
+    info.speed     = info.active ? (int)(800 + cpu * 25.0f) : 0;
+    info.level     = (info.speed < 1200) ? 1 : (info.speed < 2000) ? 2 : (info.speed < 3000) ? 3 : 4;
+    info.simulated = true;
     return info;
 }
 

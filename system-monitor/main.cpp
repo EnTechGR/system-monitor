@@ -175,6 +175,9 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
             if (fanInfo.enabled) {
                 ImGui::TextColored(ImVec4(0.3f,0.9f,0.4f,1), "Status: Enabled  |  Active: %s  |  Speed: %d RPM  |  Level: %d",
                     fanInfo.active ? "Yes" : "No", fanInfo.speed, fanInfo.level);
+                ImGui::SameLine();
+                if (fanInfo.simulated) ImGui::TextColored(ImVec4(1,0.6f,0,1), " (Simulated)");
+                else                   ImGui::TextColored(ImVec4(0,1,0,1), " (Real)");
             } else {
                 ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Fan sensor not available on this system");
                 ImGui::Text("Status: N/A  |  Active: No  |  Speed: 0 RPM  |  Level: 0");
@@ -187,8 +190,12 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
         }
         if (ImGui::BeginTabItem("Thermal"))
         {
-            if (thermalCur > 0)
+            if (thermalCur > 0) {
                 ImGui::TextColored(ImVec4(0.3f,0.9f,0.4f,1), "Current Temp: %.1f °C", thermalCur);
+                ImGui::SameLine();
+                if (isThermalSimulated()) ImGui::TextColored(ImVec4(1,0.6f,0,1), " (Simulated)");
+                else                     ImGui::TextColored(ImVec4(0,1,0,1), " (Real)");
+            }
             else
                 ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Thermal sensor not available on this system");
             thermalG.controls("Stop##ts","##tf","##tsc", 1.0f, 200.0f);

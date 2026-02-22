@@ -16,6 +16,8 @@
 #include <sys/types.h>
 #include <sys/sysinfo.h>
 #include <sys/statvfs.h>
+#include <sys/select.h>
+#include <fcntl.h>
 #include <ctime>
 #include <ifaddrs.h>
 #include <netinet/in.h>
@@ -74,6 +76,7 @@ struct DiskInfo {
 struct FanInfo {
     bool enabled, active;
     int speed, level;
+    bool simulated; // New: track source
 };
 
 struct ProcessCounts {
@@ -95,6 +98,7 @@ float getCPUUsage();
 string getHostname();
 string getUsername();
 float getTemperature();
+bool isThermalSimulated(); // New
 FanInfo getFanInfo();
 long long getUptime();
 ProcessCounts getProcessCounts();

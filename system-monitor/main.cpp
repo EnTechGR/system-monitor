@@ -32,7 +32,7 @@ struct Graph {
     int    offset = 0;
     int    count  = 0;
     bool   stopped = false;
-    float  fps    = 10.0f;
+    float  fps    = 2.0f;   // 2 samples/sec = stable 500 ms readings
     float  scale  = 100.0f;
     double lastT  = -1.0;
 
@@ -41,10 +41,13 @@ struct Graph {
         offset++;
         count = min(count + 1, HIST);
     }
-    void draw(const char *id, const char *overlay, ImVec2 sz) {
-        int cnt = count;
+    void draw(const char *id, const char *overlay, float height) {
+        // PlotLines does NOT support -1 for auto-width; must be explicit or 0
+        float w = ImGui::GetContentRegionAvail().x;
+        // Need at least 2 points for PlotLines to draw a bordered box
+        int cnt = (count >= 2) ? count : 2;
         int off = (offset >= HIST) ? (offset % HIST) : 0;
-        ImGui::PlotLines(id, data, cnt, off, overlay, 0.0f, scale, sz);
+        ImGui::PlotLines(id, data, cnt, off, overlay, 0.0f, scale, ImVec2(w, height));
     }
     void controls(const char *stopId, const char *fpsId, const char *scaleId,
                   float sMin = 10.f, float sMax = 200.f) {
@@ -96,6 +99,15 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
     static FanInfo fanInfo = {};
     static float cpuCur = 0, thermalCur = 0;
 
+    // One-time: set sensible default scales per graph
+    static bool graphsInit = false;
+    if (!graphsInit) {
+        cpuG.scale     = 10.0f;    // 0-10% range by default; user can adjust
+        fanG.scale     = 2000.0f;  // 0-2000 RPM default
+        thermalG.scale = 100.0f;   // 0-100 °C default
+        graphsInit = true;
+    }
+
     double now = ImGui::GetTime();
 
     // Refresh slow data every 2 s
@@ -122,6 +134,10 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
 
     // ── Info rows ───────────────────────────────────────────────────────────
     ImGui::TextColored(ImVec4(0.4f,0.8f,1.0f,1), "OS");       ImGui::SameLine(80); ImGui::Text("%s", getOsName());
+    ImGui::TextColored(ImVec4(0.4f,0.8f,1.0f,1), "Env");      ImGui::SameLine(80); ImGui::Text("%s", getEnvironmentInfo().c_str());
+    if (isVirtualMachine()) {
+        ImGui::TextColored(ImVec4(0.4f,0.8f,1.0f,1), "Bridge");   ImGui::SameLine(80); ImGui::Text("Host IP: %s (Port 8085)", getHostIP().c_str());
+    }
     ImGui::TextColored(ImVec4(0.4f,0.8f,1.0f,1), "User");     ImGui::SameLine(80); ImGui::Text("%s", username.c_str());
     ImGui::TextColored(ImVec4(0.4f,0.8f,1.0f,1), "Host");     ImGui::SameLine(80); ImGui::Text("%s", hostname.c_str());
 
@@ -144,30 +160,42 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
     {
         if (ImGui::BeginTabItem("CPU"))
         {
-            cpuG.controls("Stop##cs","##cf","##csc");
+            // Live readout — always visible regardless of scale
+            ImGui::TextColored(ImVec4(0.3f,0.9f,0.4f,1), "Current CPU: %.2f %%", cpuCur);
+            ImGui::SameLine(220);
+            ImGui::TextDisabled("(Ctrl+drag slider for fine control)");
+            // sMin=1 so even 1% CPU fills half the graph when scale=2
+            cpuG.controls("Stop##cs","##cf","##csc", 1.0f, 100.0f);
             char ov[32]; snprintf(ov, sizeof(ov), "%.1f%%", cpuCur);
-            cpuG.draw("##cg", ov, ImVec2(-1, 120));
+            cpuG.draw("##cg", ov, 120.0f);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Fan"))
         {
-            ImGui::Text("Status:  %s", fanInfo.enabled ? "Enabled" : "N/A");
-            ImGui::Text("Active:  %s", fanInfo.active  ? "Yes"     : "No");
-            ImGui::Text("Speed:   %d RPM", fanInfo.speed);
-            ImGui::Text("Level:   %d",     fanInfo.level);
+            if (fanInfo.enabled) {
+                ImGui::TextColored(ImVec4(0.3f,0.9f,0.4f,1), "Status: Enabled  |  Active: %s  |  Speed: %d RPM  |  Level: %d",
+                    fanInfo.active ? "Yes" : "No", fanInfo.speed, fanInfo.level);
+            } else {
+                ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Fan sensor not available on this system");
+                ImGui::Text("Status: N/A  |  Active: No  |  Speed: 0 RPM  |  Level: 0");
+            }
             ImGui::Spacing();
-            fanG.controls("Stop##fs","##ff","##fsc", 100.f, 8000.f);
+            fanG.controls("Stop##fs","##ff","##fsc", 1.0f, 8000.0f);
             char ov[32]; snprintf(ov, sizeof(ov), "%d RPM", fanInfo.speed);
-            fanG.draw("##fg", ov, ImVec2(-1, 100));
+            fanG.draw("##fg", ov, 100.0f);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Thermal"))
         {
-            thermalG.controls("Stop##ts","##tf","##tsc");
+            if (thermalCur > 0)
+                ImGui::TextColored(ImVec4(0.3f,0.9f,0.4f,1), "Current Temp: %.1f °C", thermalCur);
+            else
+                ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Thermal sensor not available on this system");
+            thermalG.controls("Stop##ts","##tf","##tsc", 1.0f, 200.0f);
             char ov[32];
             if (thermalCur > 0) snprintf(ov, sizeof(ov), "%.1f C", thermalCur);
             else                snprintf(ov, sizeof(ov), "N/A");
-            thermalG.draw("##tg", ov, ImVec2(-1, 120));
+            thermalG.draw("##tg", ov, 120.0f);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -241,6 +269,7 @@ void memoryProcessesWindow(const char *id, ImVec2 size, ImVec2 position)
                 ImGui::TableHeadersRow();
 
                 string flt = string(filterBuf);
+                static set<int> selectedPids;
 
                 for (auto &p : procs)
                 {
@@ -249,7 +278,30 @@ void memoryProcessesWindow(const char *id, ImVec2 size, ImVec2 position)
                         to_string(p.pid).find(flt) == string::npos) continue;
 
                     ImGui::TableNextRow();
-                    ImGui::TableNextColumn(); ImGui::Text("%d",   p.pid);
+                    ImGui::TableSetColumnIndex(0);
+
+                    bool isSelected = selectedPids.count(p.pid) > 0;
+                    char selId[32];
+                    snprintf(selId, sizeof(selId), "##sel%d", p.pid);
+
+                    // Selectable spans all columns for click-row selection
+                    if (ImGui::Selectable(selId, isSelected,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap,
+                        ImVec2(0, ImGui::GetTextLineHeightWithSpacing())))
+                    {
+                        if (ImGui::GetIO().KeyCtrl)
+                        {
+                            if (isSelected) selectedPids.erase(p.pid);
+                            else            selectedPids.insert(p.pid);
+                        }
+                        else
+                        {
+                            selectedPids.clear();
+                            selectedPids.insert(p.pid);
+                        }
+                    }
+                    ImGui::SameLine();
+                    ImGui::Text("%d",   p.pid);
                     ImGui::TableNextColumn(); ImGui::Text("%s",   p.name.c_str());
                     ImGui::TableNextColumn(); ImGui::Text("%c",   p.state);
                     ImGui::TableNextColumn(); ImGui::Text("%.2f", p.cpuUsage);

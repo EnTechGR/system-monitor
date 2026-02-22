@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <map>
+#include <set>
 #include <sstream>
 #include <algorithm>
 #include <string>
@@ -97,6 +98,9 @@ float getTemperature();
 FanInfo getFanInfo();
 long long getUptime();
 ProcessCounts getProcessCounts();
+bool isVirtualMachine();
+string getEnvironmentInfo();
+string getHostIP();
 
 // mem.cpp
 MemInfo getMemInfo();

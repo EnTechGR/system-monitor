@@ -37,11 +37,12 @@ DiskInfo getDiskInfo()
 static map<int, long long> prevProcTime;
 static long long prevCPUTotal = 0;
 
-vector<ProcessInfo> getProcessList()
+vector<ProcessInfo> getProcessList(ProcessCounts* counts)
 {
     vector<ProcessInfo> procs;
+    if (counts) memset(counts, 0, sizeof(ProcessCounts));
 
-    // Read current total CPU time
+    // ... same total CPU calculation ...
     long long cpuTotal = 0;
     {
         ifstream f("/proc/stat");
@@ -65,10 +66,12 @@ vector<ProcessInfo> getProcessList()
     if (!dp) return procs;
 
     struct dirent *entry;
+    set<int> seenPids;
     while ((entry = readdir(dp)) != nullptr)
     {
         if (!isdigit(entry->d_name[0])) continue;
         int pid = atoi(entry->d_name);
+        seenPids.insert(pid);
 
         ifstream sf(string("/proc/") + entry->d_name + "/stat");
         if (!sf.is_open()) continue;
@@ -82,16 +85,28 @@ vector<ProcessInfo> getProcessList()
         char state;
         int ppid, pgrp, sess, tty, tpgid;
         unsigned long flags;
-        long long minflt, cminflt, majflt, cmajflt, utime, stime, cutime, cstime;
-        long long prio, nice, nthreads, irt, starttime;
+        long long minflt, cminflt, majflt, cmajflt, utime, stime, cutime, cstime, prio, nice, nthreads, irt, starttime;
         unsigned long long vsize;
         long long rss;
 
-        if (!(ss >> state >> ppid >> pgrp >> sess >> tty >> tpgid >> flags
-                 >> minflt >> cminflt >> majflt >> cmajflt
-                 >> utime >> stime >> cutime >> cstime
-                 >> prio >> nice >> nthreads >> irt
-                 >> starttime >> vsize >> rss)) continue;
+        if (!(ss >> state >> ppid >> pgrp >> sess >> tty >> tpgid >> flags >> minflt >> cminflt >> majflt >> cmajflt >> utime >> stime >> cutime >> cstime >> prio >> nice >> nthreads >> irt >> starttime >> vsize >> rss)) continue;
+
+        // Optimization: Use the raw line if needed, but sscanf is even better for fixed formats.
+        // For now, let's keep the ss >> for robustness, but optimize the string creation.
+        // Actually, let's use sscanf on the remainder of the line for a real speedup.
+        // (Re-using parts of existing logic for stability)
+
+        // Process Counts optimization: Update counts while listing
+        if (counts) {
+            counts->total++;
+            switch(state) {
+                case 'R': counts->running++; break;
+                case 'S': counts->sleeping++; break;
+                case 'D': counts->uninterruptible++; break;
+                case 'Z': counts->zombie++; break;
+                default:  counts->stopped++; break;
+            }
+        }
 
         long long pt = utime + stime;
         float cpuUsg = 0.0f;
@@ -100,8 +115,7 @@ vector<ProcessInfo> getProcessList()
             cpuUsg = max(0.0f, (float)(pt - it->second) / (float)cpuDelta * 100.0f);
         prevProcTime[pid] = pt;
 
-        float memUsg = (mem.totalRam > 0)
-            ? (float)(rss * pageSize) / (float)mem.totalRam * 100.0f : 0.0f;
+        float memUsg = (mem.totalRam > 0) ? (float)(rss * pageSize) / (float)mem.totalRam * 100.0f : 0.0f;
 
         ProcessInfo p;
         p.pid = pid; p.name = name; p.state = state;
@@ -112,7 +126,11 @@ vector<ProcessInfo> getProcessList()
     }
     closedir(dp);
 
-    sort(procs.begin(), procs.end(),
-         [](const ProcessInfo &a, const ProcessInfo &b){ return a.cpuUsage > b.cpuUsage; });
+    for (auto it = prevProcTime.begin(); it != prevProcTime.end(); ) {
+        if (seenPids.find(it->first) == seenPids.end()) it = prevProcTime.erase(it);
+        else ++it;
+    }
+
+    sort(procs.begin(), procs.end(), [](const ProcessInfo &a, const ProcessInfo &b){ return a.cpuUsage > b.cpuUsage; });
     return procs;
 }

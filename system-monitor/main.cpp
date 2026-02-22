@@ -112,7 +112,6 @@ void systemWindow(const char *id, ImVec2 size, ImVec2 position)
 
     // Refresh slow data every 2 s
     if (now - lastInfoT > 2.0) {
-        pCounts  = getProcessCounts();
         uptime   = getUptime();
         lastInfoT = now;
     }
@@ -225,11 +224,12 @@ void memoryProcessesWindow(const char *id, ImVec2 size, ImVec2 position)
     static double lastUpdateT = -5.0;
     static char filterBuf[128] = {};
 
+    static ProcessCounts pCountsBuf = {};
     double now = ImGui::GetTime();
-    if (now - lastUpdateT > 1.0) {
+    if (now - lastUpdateT > 2.0) {
         mem  = getMemInfo();
         disk = getDiskInfo();
-        procs = getProcessList();
+        procs = getProcessList(&pCountsBuf);
         lastUpdateT = now;
     }
 
@@ -278,41 +278,46 @@ void memoryProcessesWindow(const char *id, ImVec2 size, ImVec2 position)
                 string flt = string(filterBuf);
                 static set<int> selectedPids;
 
-                for (auto &p : procs)
+                ImGuiListClipper clipper;
+                clipper.Begin(procs.size());
+                while (clipper.Step())
                 {
-                    if (!flt.empty() &&
-                        p.name.find(flt) == string::npos &&
-                        to_string(p.pid).find(flt) == string::npos) continue;
-
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-
-                    bool isSelected = selectedPids.count(p.pid) > 0;
-                    char selId[32];
-                    snprintf(selId, sizeof(selId), "##sel%d", p.pid);
-
-                    // Selectable spans all columns for click-row selection
-                    if (ImGui::Selectable(selId, isSelected,
-                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap,
-                        ImVec2(0, ImGui::GetTextLineHeightWithSpacing())))
+                    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
                     {
-                        if (ImGui::GetIO().KeyCtrl)
+                        auto &p = procs[i];
+                        if (!flt.empty() && 
+                            p.name.find(flt) == string::npos && 
+                            to_string(p.pid).find(flt) == string::npos) continue;
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+
+                        bool isSelected = selectedPids.count(p.pid) > 0;
+                        char selId[32];
+                        snprintf(selId, sizeof(selId), "##sel%d", p.pid);
+
+                        if (ImGui::Selectable(selId, isSelected,
+                            ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap,
+                            ImVec2(0, 0)))
                         {
-                            if (isSelected) selectedPids.erase(p.pid);
-                            else            selectedPids.insert(p.pid);
+                            if (ImGui::GetIO().KeyCtrl)
+                            {
+                                if (isSelected) selectedPids.erase(p.pid);
+                                else            selectedPids.insert(p.pid);
+                            }
+                            else
+                            {
+                                selectedPids.clear();
+                                selectedPids.insert(p.pid);
+                            }
                         }
-                        else
-                        {
-                            selectedPids.clear();
-                            selectedPids.insert(p.pid);
-                        }
+                        ImGui::SameLine();
+                        ImGui::Text("%d", p.pid);
+                        ImGui::TableNextColumn(); ImGui::Text("%s", p.name.c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%c", p.state);
+                        ImGui::TableNextColumn(); ImGui::Text("%.2f", p.cpuUsage);
+                        ImGui::TableNextColumn(); ImGui::Text("%.2f", p.memUsage);
                     }
-                    ImGui::SameLine();
-                    ImGui::Text("%d",   p.pid);
-                    ImGui::TableNextColumn(); ImGui::Text("%s",   p.name.c_str());
-                    ImGui::TableNextColumn(); ImGui::Text("%c",   p.state);
-                    ImGui::TableNextColumn(); ImGui::Text("%.2f", p.cpuUsage);
-                    ImGui::TableNextColumn(); ImGui::Text("%.2f", p.memUsage);
                 }
                 ImGui::EndTable();
             }
@@ -562,6 +567,10 @@ int main(int, char **)
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+        
+        // Low-Frequency Mode: 20 FPS is plenty for a monitor.
+        // This drastically reduces CPU and Power consumption.
+        SDL_Delay(50); 
     }
 
     ImGui_ImplOpenGL3_Shutdown();

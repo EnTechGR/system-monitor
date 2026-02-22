@@ -1,4 +1,7 @@
 #include "header.h"
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 string CPUinfo()
 {
@@ -83,21 +86,28 @@ string getUsername()
     return "unknown";
 }
 
+static bool isVM_cached = false;
+static bool isVM_found = false;
+
 bool isVirtualMachine()
 {
+    if (isVM_cached) return isVM_found;
     ifstream f("/proc/version");
     if (f.is_open()) {
         string line; getline(f, line);
         transform(line.begin(), line.end(), line.begin(), ::tolower);
-        if (line.find("microsoft") != string::npos || line.find("wsl") != string::npos) return true;
+        if (line.find("microsoft") != string::npos || line.find("wsl") != string::npos) isVM_found = true;
     }
-    ifstream f2("/proc/sys/kernel/osrelease");
-    if (f2.is_open()) {
-        string line; getline(f2, line);
-        transform(line.begin(), line.end(), line.begin(), ::tolower);
-        if (line.find("microsoft") != string::npos || line.find("wsl") != string::npos) return true;
+    if (!isVM_found) {
+        ifstream f2("/proc/sys/kernel/osrelease");
+        if (f2.is_open()) {
+            string line; getline(f2, line);
+            transform(line.begin(), line.end(), line.begin(), ::tolower);
+            if (line.find("microsoft") != string::npos || line.find("wsl") != string::npos) isVM_found = true;
+        }
     }
-    return false;
+    isVM_cached = true;
+    return isVM_found;
 }
 
 string getEnvironmentInfo()
@@ -108,154 +118,90 @@ string getEnvironmentInfo()
 
 string getHostIP()
 {
-    // Hardcoded for testing since user confirmed this is the host IP
     return "192.168.176.1";
 }
 
-// Attempts to read JSON from LHM web server: http://host:8085/data.json
-static string fetchFromHost()
+static string g_bridgeData = "";
+static mutex g_bridgeMtx;
+static atomic<bool> g_bridgeThreadStarted(false);
+
+static void bridgeWorker()
 {
-    static double lastAttemptT = 0;
-    static double lastFailureT = 0;
-    static string cachedData = ""; 
-    double now = (double)time(NULL);
-
-    // Cooldown on failure (2 seconds for debugging)
-    if (now - lastFailureT < 2.0) return cachedData;
-    if (now - lastAttemptT < 1.0) return cachedData;
-    lastAttemptT = now;
-
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return "";
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(8085);
-    string host = getHostIP();
-    
-    // Convert IP correctly
-    if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) <= 0) {
-        printf("[Bridge] Invalid IP: %s\n", host.c_str());
-        close(sock); return "";
-    }
-
-    printf("[Bridge] Connecting to %s:8085...\n", host.c_str());
-
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    
-    int res = connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
-    if (res < 0 && errno == EINPROGRESS) {
-        fd_set set; 
-        struct timeval tv = {2, 0}; // 2s timeout
-        FD_ZERO(&set); 
-        FD_SET(sock, &set);
-        int s_res = select(sock + 1, NULL, &set, NULL, &tv);
-        if (s_res > 0) {
-            int err; socklen_t len = sizeof(err);
-            getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len);
-            if (err == 0) res = 0;
-            else errno = err;
-        } else if (s_res == 0) {
-            errno = ETIMEDOUT;
-        }
-    }
-
-    if (res < 0) {
-        lastFailureT = now;
-        printf("[Bridge] Connection failed (Error %d: %s)\n", errno, strerror(errno));
-        close(sock); return cachedData;
-    }
-
-    // Connected!
-    printf("[Bridge] SUCCESS! Connected. Requesting data...\n");
-    string req = "GET /data.json HTTP/1.1\r\nHost: " + host + ":8085\r\nConnection: close\r\n\r\n";
-    send(sock, req.c_str(), req.length(), 0);
-
-    fcntl(sock, F_SETFL, flags);
-    struct timeval tv_r = {1, 0}; 
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv_r, sizeof tv_r);
-
-    string response;
-    char buf[16384]; 
-    int bytes;
-    while ((bytes = read(sock, buf, sizeof(buf)-1)) > 0) {
-        buf[bytes] = 0;
-        response += buf;
-        if (response.length() > 512 * 1024) break;
-    }
-    close(sock);
-
-    if (response.find("{") == string::npos) return cachedData;
-
-    float t = -1; int f = -1;
-    
-    // Improved Helper: Finds a sensor by name AND type
-    auto getValByNameAndType = [&](string name, string type) {
-        size_t searchPos = 0;
-        while ((searchPos = response.find("\"Text\":\"" + name + "\"", searchPos)) != string::npos) {
-            // Check if "Type":"type" is within 200 chars of this sensor
-            size_t endOfObj = response.find("}", searchPos);
-            size_t typePos = response.find("\"Type\":\"" + type + "\"", searchPos);
+    while (true) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock >= 0) {
+            struct sockaddr_in serv_addr;
+            memset(&serv_addr, 0, sizeof(serv_addr));
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_port = htons(8085);
+            string host = getHostIP();
             
-            if (typePos != string::npos && (endOfObj == string::npos || typePos < endOfObj + 50)) {
-                size_t valPos = response.find("\"Value\":\"", searchPos);
-                if (valPos != string::npos && valPos < typePos + 100) {
-                    size_t start = valPos + 9;
-                    size_t end = response.find("\"", start);
-                    return response.substr(start, end - start);
+            if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) > 0) {
+                struct timeval tv = {2, 0}; 
+                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+                setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+
+                if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == 0) {
+                    string req = "GET /data.json HTTP/1.1\r\nHost: " + host + ":8085\r\nConnection: close\r\n\r\n";
+                    send(sock, req.c_str(), req.length(), 0);
+
+                    string response;
+                    char buf[16384]; int bytes;
+                    while ((bytes = read(sock, buf, sizeof(buf)-1)) > 0) {
+                        buf[bytes] = 0; response += buf;
+                        if (response.length() > 512 * 1024) break;
+                    }
+
+                    if (response.find("{") != string::npos) {
+                        auto getV = [&](string k, string t) {
+                            size_t p = 0;
+                            while ((p = response.find("\"Text\":\"" + k + "\"", p)) != string::npos) {
+                                size_t eO = response.find("}", p);
+                                size_t tP = response.find("\"Type\":\"" + t + "\"", p);
+                                if (tP != string::npos && (eO == string::npos || tP < eO + 70)) {
+                                    size_t vP = response.find("\"Value\":\"", p);
+                                    if (vP != string::npos && vP < tP + 100) {
+                                        size_t s = vP + 9, e = response.find("\"", s);
+                                        return response.substr(s, e - s);
+                                    }
+                                }
+                                p += 10;
+                            }
+                            return string("");
+                        };
+                        string tS = getV("CPU Package", "Temperature");
+                        if (tS.empty()) tS = getV("CPU Total", "Temperature");
+                        string fS = getV("Fan #1", "Fan");
+                        if (fS.empty()) fS = getV("Fan", "Fan");
+                        
+                        float tV = -1; int fV = -1;
+                        if (!tS.empty()) { size_t s = tS.find_first_of("0123456789.-"); if (s != string::npos) tV = atof(tS.substr(s).c_str()); }
+                        if (!fS.empty()) { size_t s = fS.find_first_of("0123456789"); if (s != string::npos) fV = atoi(fS.substr(s).c_str()); }
+
+                        if (tV > 0 || fV >= 0) {
+                            char out[64];
+                            snprintf(out, sizeof(out), "%.1f:%d:1", (tV > 0 ? tV : 0.0f), (fV >= 0 ? fV : 0));
+                            lock_guard<mutex> lock(g_bridgeMtx);
+                            g_bridgeData = out;
+                        }
+                    }
                 }
             }
-            searchPos += 10;
+            close(sock);
         }
-        return string("");
-    };
-
-    // Fallback: Finds the FIRST sensor of a specific type
-    auto getFirstValByType = [&](string type) {
-        size_t typePos = response.find("\"Type\":\"" + type + "\"");
-        if (typePos == string::npos) return string("");
-        
-        // Value is usually just before Type in the JSON string
-        size_t startSearch = (typePos > 200) ? typePos - 200 : 0;
-        size_t valPos = response.find("\"Value\":\"", startSearch);
-        if (valPos != string::npos && valPos < typePos + 100) {
-            size_t start = valPos + 9;
-            size_t end = response.find("\"", start);
-            return response.substr(start, end - start);
-        }
-        return string("");
-    };
-
-    string tStr = getValByNameAndType("CPU Package", "Temperature");
-    if (tStr.empty()) tStr = getValByNameAndType("CPU Total", "Temperature");
-    if (tStr.empty()) tStr = getFirstValByType("Temperature");
-
-    if (!tStr.empty()) {
-        size_t s = tStr.find_first_of("0123456789.-");
-        if (s != string::npos) t = atof(tStr.substr(s).c_str());
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
     }
-
-    string fStr = getValByNameAndType("Fan #1", "Fan");
-    if (fStr.empty()) fStr = getValByNameAndType("Fan", "Fan");
-    if (fStr.empty()) fStr = getFirstValByType("Fan");
-
-    if (!fStr.empty()) {
-        size_t s = fStr.find_first_of("0123456789");
-        if (s != string::npos) f = atoi(fStr.substr(s).c_str());
-    }
-
-    if (t > 0 || f >= 0) {
-        char out[64];
-        snprintf(out, sizeof(out), "%.1f:%d:1", (t > 0 ? t : 0.0f), (f >= 0 ? f : 0));
-        cachedData = out;
-        printf("[Bridge] Match Found! Temp=%.1f C, Fan=%d RPM\n", t, f);
-    } else {
-        printf("[Bridge] No Temperature/Fan sensors found in JSON.\n");
-    }
-    return cachedData;
 }
+
+static string fetchFromHost()
+{
+    if (!g_bridgeThreadStarted.exchange(true)) {
+        std::thread(bridgeWorker).detach();
+    }
+    lock_guard<mutex> lock(g_bridgeMtx);
+    return g_bridgeData;
+}
+
 
 static bool thermalIsSim = false;
 

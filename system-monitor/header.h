@@ -109,7 +109,7 @@ string getHostIP();
 // mem.cpp
 MemInfo getMemInfo();
 DiskInfo getDiskInfo();
-vector<ProcessInfo> getProcessList();
+vector<ProcessInfo> getProcessList(ProcessCounts* counts = nullptr);
 
 // network.cpp
 vector<NetworkInterface> getNetworkInterfaces();

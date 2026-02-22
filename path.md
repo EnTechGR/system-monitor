@@ -1,0 +1,1 @@
+PS C:\Users\marin\AppData\Local\Microsoft\WinGet\Packages\LibreHardwareMonitor.LibreHardwareMonitor_Microsoft.Winget.Source_8wekyb3d8bbwe>  Start-Process .\LibreHardwareMonitor.exe -Verb RunAs

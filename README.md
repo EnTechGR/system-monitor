@@ -90,4 +90,4 @@ This application is engineered for maximum transparency and minimal resource imp
 ## 📄 License
 This project is licensed under the MIT License. It includes [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and [gl3w](https://github.com/skaslev/gl3w) (Unlicense).
 
-![Downloads](https://img.shields.io/github/downloads/yourusername/your-repo-name/total?style=for-the-badge&color=blue)
+![Downloads](https://img.shields.io/github/downloads/entechgr/system-monitor/total?style=for-the-badge&color=blue)
